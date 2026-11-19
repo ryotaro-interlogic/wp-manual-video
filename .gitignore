@@ -1,0 +1,25 @@
+# Secrets and local configuration
+cred.json
+**/cred.json
+.env
+.env.*
+!.env.example
+site.json
+**/site.json
+
+# Generated output and screenshots
+node_modules/
+shots/
+**/shots/
+rects.json
+marks.json
+*.pptx
+*.pdf
+*.mp4
+
+# OS and tooling
+.DS_Store
+__MACOSX/
+._*
+__pycache__/
+*.pyc
