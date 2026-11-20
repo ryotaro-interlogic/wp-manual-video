@@ -8,6 +8,7 @@ WordPressの管理画面を実際に操作・撮影し、初心者向けの操�
 - スクリーンショットに操作箇所の赤枠・番号を追加
 - 同一の `deck.json` からPowerPoint・PDF・動画を制作
 - 公開側のどの場所に反映されるかを説明
+- サイトの配色・書体・角の丸さを読み取り、マニュアルの見た目をサイトに合わせる（ロゴはユーザーから受け取って配置）
 - WordPress / WPForms / カスタム投稿 / 固定ページ / ACF などの操作説明に対応
 
 ## ファイル構成
@@ -15,7 +16,7 @@ WordPressの管理画面を実際に操作・撮影し、初心者向けの操�
 - `SKILL.md` — 作業手順・実行ルール
 - `references/` — 撮影・文章・スライド仕様
 - `scripts/` — 撮影支援・資料・動画生成スクリプト
-- `examples/wpforms-new-form/` — WPFormsを例にした構成ファイル
+- `examples/wpforms-new-form/` — 撮影スクリプト（capture.js）とサイト設定（site.example.json）の見本。WPFormsの撮影を例にしている
 
 ## 導入
 

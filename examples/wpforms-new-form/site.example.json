@@ -3,6 +3,7 @@
  "base": "https://example.com/site-a",
  "credFile": "cred.json",
  "shotsDir": "shots",
+ "designPages": ["/"],
  "mask": {
   "blurSelectors": [],
   "blurWords": ["株式会社〇〇", "〇〇 Inc."],

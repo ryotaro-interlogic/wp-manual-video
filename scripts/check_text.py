@@ -38,6 +38,30 @@ BAD_END = [
 
 LIMIT = {'step': 40, 'note_side': 50, 'note_full': 70}
 
+# 見出しを言い換えただけの説明かを見るときに取り除く、ありふれた言い回し（writing-guide.md の 5）
+FILLER = r'を|が|は|の|に|、|。|入力|クリック|選択|します|されます|できます|ます|内容|変更|管理者|ください|して'
+# note が手順や情報だけになっていないか（writing-guide.md の 6）
+NOTE_PROC = r'(クリック|入力|選択)します。?$'
+NOTE_RISK = r'ない|ません|消え|戻せ|削除|変え|届か|影響|使用中'
+# タイトルの形（writing-guide.md の 7）
+TITLE_FORMS = [
+    (r'^「[^」]+」(を|で)', 'ボタン名で始まる形（「〇〇」で／を〜）'),
+    (r'をクリックして', '「〜をクリックして〜」の形'),
+]
+
+
+def body_is_echo(head, body):
+    """説明が見出しの言い換えだけか（見出しの中心の語を取り除くと、ありふれた言い回ししか残らないか）"""
+    core = re.sub(r'[「」]|を?(入力|クリック|選択|確認)$|（任意）', '', head).strip()
+    # 「保存する」→「保存されます」のように形が変わっても拾えるよう、漢字・カタカナ・英数字の語で比べる
+    words = [w for w in re.findall(r'[一-龥ァ-ヶーA-Za-z0-9]{2,}', core) if not re.fullmatch(FILLER, w)]
+    if not words or not all(w in body for w in words):
+        return False
+    rest = body
+    for w in words:
+        rest = rest.replace(w, '')
+    return len(re.sub(FILLER, '', rest)) <= 3
+
 
 def texts(deck):
     """(場所, 種類, 文) を順に返す"""
@@ -87,7 +111,7 @@ def check(deck):
         if re.search(STATE, plain):
             out.append((loc, '撮影日のサイトの状態に頼った書き方。古くなるのでユーザーへの報告に回す', text))
         if kind in ('step', 'card', 'note_side', 'note_full', 'extra'):
-            body = plain.rstrip('。 　')
+            body = re.sub(r'。?例[：:）)].*$', '', plain).rstrip('。 　')  # 末尾の「例：〇〇」は名詞で終わってよい
             for pat, msg in BAD_END:
                 if re.search(pat, body):
                     out.append((loc, msg, text))
@@ -97,10 +121,53 @@ def check(deck):
         if kind == 'say' and len(text) > 40:
             out.append((loc, f'{len(text)}字。字幕が2行を超えるかもしれない', text))
 
-    # 画面スライドに「この編集機能があるページ」が無い
-    for i, sl in enumerate(deck.get('slides', []), 1):
-        if sl.get('type') == 'shot' and not sl.get('where') and not sl.get('noWhere'):
-            out.append((f'スライド{i}（shot）', '`where`（この編集機能があるページ）が無い。ログイン画面など不要なら "noWhere": true', sl.get('title', '')))
+    slides = deck.get('slides', [])
+    content = [sl for sl in slides if sl.get('type') not in ('cover', 'section')]
+    prev_form, run = None, 0
+    for i, sl in enumerate(slides, 1):
+        t = sl.get('type')
+        where = f'スライド{i}（{t}）'
+        # 画面スライドに「この編集機能があるページ」が無い
+        if t == 'shot' and not sl.get('where') and not sl.get('noWhere'):
+            out.append((where, '`where` が無い。入力した内容がサイトに表示される画面なら書く。表示に関係しない画面（ログイン・メニュー・ダッシュボードなど）は "noWhere": true', sl.get('title', '')))
+        # where に管理画面の場所を書いている
+        if sl.get('where') and re.search(r'メニュー|右上|左上|左側|右側|管理画面|ダッシュボード', sl['where']):
+            out.append((where, '`where` には管理画面の場所ではなく、サイトのページ名を書く（writing-guide.md の 7）', sl['where']))
+
+        # 手順の絞り方（writing-guide.md の 5）
+        st = sl.get('steps') or []
+        if len(st) > 5:
+            out.append((where, f'手順が{len(st)}つある。5つまでを目安に、任意の欄をまとめるか画面を分ける', sl.get('title', '')))
+        opt = [s[0] for s in st if '任意' in s[0]]
+        if len(opt) >= 2:
+            out.append((where, '（任意）の欄に別々の番号を付けている。番号を外して1文にまとめる', '／'.join(opt)))
+        for n, s in enumerate(st, 1):
+            if len(s) > 1 and s[1] and body_is_echo(s[0], s[1]):
+                out.append((f'{where} 手順{n}', '説明が見出しの言い換えだけかもしれない。足すことが無ければ空文字にする', f'{s[0]} ／ {s[1]}'))
+
+        # note の使い分け（writing-guide.md の 6）
+        nt = (sl.get('note') or {}).get('text', '')
+        if nt:
+            label = '注意' if sl['note'].get('kind') == 'warn' else 'ポイント'
+            if re.search(r'https?://|URL[：:]', nt):
+                out.append((f'{where} note', f'{label}に URL を書いている。URL などの情報は extra に書く', nt))
+            elif re.search(NOTE_PROC, nt) and not re.search(NOTE_RISK, nt):
+                out.append((f'{where} note', f'{label}が操作の手順になっている。手順なら steps に足す', nt))
+
+        # タイトルの形が続いていないか（writing-guide.md の 7）
+        title = sl.get('title', '')
+        if title.endswith('。'):
+            out.append((where, 'タイトルに句点「。」を付けない', title))
+        form = next((name for pat, name in TITLE_FORMS if re.search(pat, title)), None) if t not in ('cover', 'section') else None
+        run = run + 1 if form and form == prev_form else (1 if form else 0)
+        prev_form = form
+        if run == 3:
+            out.append((where, f'{form}のタイトルが3枚続いている。やることから始める形に変える', title))
+
+    # note の数（全体の3分の1が目安）
+    with_note = [sl for sl in content if sl.get('note')]
+    if content and len(with_note) > len(content) / 3 + 1:
+        out.append(('全体', f'note が{len(content)}枚中{len(with_note)}枚にある。本当に必要なスライドだけに絞る（目安は3分の1以下）', ''))
     return out
 
 
