@@ -28,18 +28,18 @@ L.saveRects(site);                               // rects.json に追記保存
 
 ```js
 const browser = await L.launch(); const page = await L.newPage(browser);
-await page.goto(site.base + '/plan/', { waitUntil: 'networkidle2' });
+await page.goto(site.base + '/〇〇/', { waitUntil: 'networkidle2' });
 await L.prepFront(page);                      // ふわっと出る演出を止めて全部表示し、遅延読み込みの画像を読ませる
 await L.siteShot(page, site, 'f_lead', {
-  anchor: '.mh-lead',                         // この要素がヘッダーの下に来るようスクロールする
+  anchor: '.lead-section',                         // この要素がヘッダーの下に来るようスクロールする
   offset: 120,                                // 固定ヘッダーの高さ＋余白（隠れたら増やす）
   height: 1200,                               // 縦に長い部分は画面の高さを伸ばして1枚で撮る
-  targets: { lead: '.mh-lead-text', ctitle: '.mh-concept-title' },   // CSS セレクタ
+  targets: { lead: '.lead-text', ctitle: '.concept-title' },   // CSS セレクタ
 });
 L.saveRects(site);
 ```
 
-- タブで切り替わるページは、表示中のタブの中だけを選ぶ（例 `.is-active .mh-lead-text`）。
+- タブで切り替わるページは、表示中のタブの中だけを選ぶ（例 `.is-active .lead-text`）。
 - 撮れた画像は必ず目で見る。固定ヘッダーが見出しを隠していたら `offset` を増やす。演出（`.reveal` など）で消えている部分があれば、`prepFront` の `hide` に足すクラス名を渡す。
 - 公開側の画像は会社名をぼかさない（クライアント自身のサイトのため）。ほかの会社名などを隠すときは `mask: true`。
 - 入力欄がサイトに出ていない（テーマが使っていない）ときは、compare の右の marks を `null` にし、ユーザーへの報告に入れる。

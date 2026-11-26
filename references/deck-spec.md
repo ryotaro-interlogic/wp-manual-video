@@ -86,8 +86,8 @@
 - サイト側の画像は `L.siteShot()` で撮る。枠は部品の位置（rects.json）か `box` で付ける。
 
 ```json
-{ "type": "compare", "title": "タブ④「リード・コンセプト」", "where": "「参考プラン例」",
-  "labels": ["管理画面", "サイト：参考プラン例ページ"],
+{ "type": "compare", "title": "タブ④「リード・コンセプト」", "where": "「〇〇」",
+  "labels": ["管理画面", "サイト：〇〇ページ"],
   "shots": [
     { "shot": "p_tab04", "crop": [172, 300, 958, 600], "marks": ["p_tab04.lead", "p_tab04.ctitle", "p_tab04.badge"] },
     { "shot": "f_lead", "crop": [220, 70, 1000, 440], "marks": ["f_lead.lead", { "rect": "f_lead.ctitle", "pos": "L" }, null] } ],
