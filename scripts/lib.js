@@ -118,6 +118,34 @@ async function login(site, { role = 'editor', loginShot } = {}) {
   return { browser, page };
 }
 
+// 公開側のページを撮る前の準備。スクロールで出てくる演出を止めて全部表示し、遅延読み込みの画像を読み込ませる。
+// hide: 演出で最初は消えている要素のセレクタ（サイトに合わせて足す）
+async function prepFront(page, { hide = ['.reveal', '.reveal-left', '.reveal-right', '.fade-in', '.js-fade', '[data-aos]', '[class*="delay-"]'] } = {}) {
+  await page.addStyleTag({ content: hide.join(',') + '{opacity:1!important;transform:none!important;transition:none!important;animation:none!important;visibility:visible!important}' });
+  await page.evaluate(async () => {
+    for (let y = 0; y < document.body.scrollHeight; y += 600) { window.scrollTo(0, y); await new Promise(r => setTimeout(r, 80)); }
+    window.scrollTo(0, 0);
+  });
+  await sleep(1200);
+}
+
+// 公開側のページの一部を撮り、部品の位置を記録する（compare / place スライド用）。
+// anchor の要素が画面の上から offset の位置に来るようにスクロールする（固定ヘッダーに隠れないよう offset はヘッダーの高さ＋余白）。
+// height で画面の高さを変えられる（縦に長い部分を1枚に収める）。targets は { 名前: CSSセレクタ }。
+async function siteShot(page, site, name, { anchor, offset = 90, height = 900, targets = {}, mask: doMask = false } = {}) {
+  await page.setViewport({ width: 1440, height, deviceScaleFactor: 2 });
+  if (anchor) {
+    const ok = await page.evaluate((a, o) => { const e = document.querySelector(a); if (!e) return false; window.scrollTo(0, e.getBoundingClientRect().top + window.scrollY - o); return true; }, anchor, offset);
+    if (!ok) console.log('siteShot', name, 'anchor missing:', anchor);
+  }
+  await sleep(900);
+  if (doMask) await mask(page, site);
+  await page.screenshot({ path: path.join(site.shotsDir, name + '.png') });
+  console.log('shot', name);
+  await rects(page, name, Object.fromEntries(Object.entries(targets).map(([k, v]) => [k, `document.querySelector(${JSON.stringify(v)})`])));
+  await page.setViewport({ width: 1440, height: 900, deviceScaleFactor: 2 });
+}
+
 // 投稿の保存・自動保存の通信を止める（新規投稿画面を撮るとき用）
 async function blockSaves(page, postType = 'posts') {
   await page.setRequestInterception(true);
@@ -130,4 +158,4 @@ async function blockSaves(page, postType = 'posts') {
   });
 }
 
-module.exports = { sleep, loadSite, login, launch, newPage, mask, shot, rects, saveRects, blockSaves };
+module.exports = { sleep, loadSite, login, launch, newPage, mask, shot, rects, saveRects, blockSaves, prepFront, siteShot };

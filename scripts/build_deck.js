@@ -10,6 +10,17 @@ const W = require('./jwrap'); // 日本語の改行（文節の切れ目と禁�
 const deckFile = path.resolve(process.argv[2] || 'deck.json');
 const DIR = path.dirname(deckFile);
 const deck = JSON.parse(fs.readFileSync(deckFile, 'utf8'));
+// ログイン情報の差し込み。文中の {{editor.user}} {{editor.pass}} を cred.json（deck.json の "cred" で変更可）の値に置き換える。
+// deck.json にパスワードを直接書かないため。置き換えた値は画面やログに出さない
+(() => {
+  const cf = path.resolve(DIR, deck.cred || 'cred.json');
+  const cred = fs.existsSync(cf) ? JSON.parse(fs.readFileSync(cf, 'utf8')) : {};
+  const sub = v => typeof v === 'string' ? v.replace(/\{\{(\w+)\.(\w+)\}\}/g, (m, a, b) => {
+    if (!cred[a] || cred[a][b] == null) throw new Error(`cred.json に ${a}.${b} がありません（${m}）`);
+    return String(cred[a][b]);
+  }) : Array.isArray(v) ? v.map(sub) : v && typeof v === 'object' ? Object.fromEntries(Object.entries(v).map(([k, x]) => [k, sub(x)])) : v;
+  deck.slides = sub(deck.slides);
+})();
 const SHOTS = path.resolve(DIR, deck.shotsDir || 'shots');
 const RECT = fs.existsSync(path.resolve(DIR, deck.rects || 'rects.json')) ? JSON.parse(fs.readFileSync(path.resolve(DIR, deck.rects || 'rects.json'), 'utf8')) : {};
 const SRC_W = 1440; // 撮影時の画面幅（論理ピクセル）
@@ -39,17 +50,40 @@ pres.title = deck.title;
 if (deck.author) pres.author = deck.author;
 pres.theme = { headFontFace: FONT, bodyFontFace: FONT };
 
-// ロゴ（ユーザーから受け取った画像）。logo は白い背景用で中身のページの下の真ん中に、logoDark は濃い背景用で表紙と章の扉に置く。
-// どちらも deck.json からの相対パス。logoDark が無ければ表紙と扉にはロゴを置かない（白い背景用のロゴが濃い背景で見えなくなるため）。
-async function logoImage(file, maxW, maxH) {
-  if (!file) return null;
+// ロゴ（ユーザーから受け取った画像）。どのページも右上に、背景の板を付けずに置く。
+// logo は白い背景用（中身のページ）、logoDark は濃い背景用（表紙と章の扉）。どちらも deck.json からの相対パス。
+// logoDark が無いときは、logo の黒〜灰色の部分（文字など）を白にした版を作って使う。色の付いた部分（マークなど）はそのまま。
+// "logoDark": false なら表紙と扉にはロゴを置かない。ロゴの背景が白く塗られていたら、その白を透明にする（背景色なしで置くため）。
+async function prepLogo(file, toWhite) {
   const p = path.resolve(DIR, file);
   if (!fs.existsSync(p)) throw new Error(`ロゴのファイルがありません：${p}`);
+  const { data, info } = await sharp(p).ensureAlpha().raw().toBuffer({ resolveWithObject: true });
+  const px = i => [data[i], data[i + 1], data[i + 2], data[i + 3]];
+  const corners = [0, info.width - 1, (info.height - 1) * info.width, info.height * info.width - 1].map(k => px(k * 4));
+  const whiteBg = corners.every(([r, g, b, a]) => a > 200 && r > 240 && g > 240 && b > 240);
+  if (!whiteBg && !toWhite) return p;
+  for (let i = 0; i < data.length; i += 4) {
+    const [r, g, b, a] = px(i);
+    if (!a) continue;
+    if (whiteBg && r > 240 && g > 240 && b > 240) { data[i + 3] = 0; continue; }
+    // 彩度が低く暗い（黒・灰色の文字）部分だけ白にする
+    if (toWhite && Math.max(r, g, b) - Math.min(r, g, b) < 40 && Math.max(r, g, b) < 170) { data[i] = data[i + 1] = data[i + 2] = 255; }
+  }
+  fs.mkdirSync(SHOTS, { recursive: true });
+  const out = path.join(SHOTS, `_logo${toWhite ? '_dark' : ''}.png`);
+  await sharp(data, { raw: info }).png().toFile(out);
+  return out;
+}
+async function logoImage(file, maxW, maxH, toWhite = false) {
+  if (!file) return null;
+  const p = await prepLogo(file, toWhite);
   const m = await sharp(p).metadata();
   let h = maxH, w = h * m.width / m.height;
   if (w > maxW) { w = maxW; h = w * m.height / m.width; }
   return { path: p, w, h };
 }
+const LOGO_R = 12.85; // ロゴの右端（タイトルなどの右端にそろえる）
+let LOGO = {};
 
 // 表紙と章の扉の背景。deck.json の coverImage（ユーザーからもらった写真など）か、site_design.js が撮ったサイトの画面（design.json の bg）を、
 // 縮小して強くぼかし、文字が読めない状態にしてから使う。上に濃い色を半透明で重ねる。"coverImage": false で使わない（塗りつぶしになる）
@@ -75,8 +109,11 @@ async function coverBackground() {
 
 let TITLE_W = 12.3; // 中身のページのタイトルの幅
 async function defineMasters() {
-  const onDark = await logoImage(deck.logoDark, 3.0, 0.8);
-  const onLight = await logoImage(deck.logo, 1.6, 0.26);
+  const onDark = deck.logoDark === false ? null : deck.logoDark ? await logoImage(deck.logoDark, 2.6, 0.7) : await logoImage(deck.logo, 2.6, 0.7, true);
+  const onLight = await logoImage(deck.logo, 1.6, 0.42);
+  LOGO = { onDark, onLight };
+  // タイトルがロゴの下に入り込まないよう、ロゴの分だけタイトルの幅を狭める
+  if (onLight) TITLE_W = Math.min(12.3, LOGO_R - onLight.w - 0.35 - 0.5);
   const bg = await coverBackground();
   // 背景の写真の上に濃い色を重ね、文字を読みやすくする（transparency は透ける割合 %）
   const dim = alpha => bg ? [{ rect: { x: 0, y: 0, w: 13.333, h: 7.5, fill: { color: HEX.navy, transparency: alpha } } }] : [];
@@ -85,21 +122,17 @@ async function defineMasters() {
     ...dim(18),
     // タイトルの左にメインの色の細い線
     { rect: { x: 0.8, y: 2.35, w: 0.07, h: 2.3, fill: { color: HEX.subtitle } } },
-    ...(onDark ? [{ image: { path: onDark.path, x: 0.8, y: 0.7, w: onDark.w, h: onDark.h } }] : []),
     { placeholder: { options: { name: 'title', type: 'title', x: 1.15, y: 2.2, w: 11.4, h: 1.4, fontSize: 40, bold: true, color: 'FFFFFF', valign: 'bottom', align: 'left', margin: 0 }, text: '' } },
     { placeholder: { options: { name: 'body', type: 'body', x: 1.15, y: 3.8, w: 11.4, h: 1.2, fontSize: 18, color: HEX.subtitle, valign: 'top', align: 'left', margin: 0 }, text: '' } },
   ] });
   pres.defineSlideMaster({ title: 'SECTION', background: back, objects: [
     ...dim(14),
-    ...(onDark ? [{ image: { path: onDark.path, x: 0.8, y: 0.6, w: onDark.w * 0.75, h: onDark.h * 0.75 } }] : []),
     { placeholder: { options: { name: 'title', type: 'title', x: 0.8, y: 2.95, w: 11.7, h: 1.1, fontSize: 40, bold: true, color: 'FFFFFF', valign: 'middle', align: 'left', margin: 0 }, text: '' } },
     { placeholder: { options: { name: 'body', type: 'body', x: 0.8, y: 4.15, w: 11.7, h: 0.9, fontSize: 16, color: HEX.sub, valign: 'top', align: 'left', margin: 0 }, text: '' } },
   ] });
   pres.defineSlideMaster({ title: 'CONTENT', background: { color: 'FFFFFF' }, objects: [
     // 左上の小さな色の四角（章の名前の目印）
     { rect: { x: 0, y: 0.2, w: 0.16, h: 0.3, fill: { color: HEX.orange } } },
-    // ロゴは下の真ん中に小さく
-    ...(onLight ? [{ image: { path: onLight.path, x: (13.333 - onLight.w) / 2, y: 7.05, w: onLight.w, h: onLight.h } }] : []),
     { placeholder: { options: { name: 'title', type: 'title', x: 0.5, y: 0.45, w: TITLE_W, h: 0.6, fontSize: 26, bold: true, color: HEX.navy, valign: 'middle', align: 'left', margin: 0 }, text: '' } },
   ], slideNumber: { x: 12.3, y: 7.0, w: 0.6, h: 0.3, fontSize: 10, color: '8A93A3', align: 'right' } });
 }
@@ -119,18 +152,60 @@ function badge(s, x, y, n, d = 0.42, color = HEX.orange) {
   s.addShape(pres.shapes.OVAL, { x, y, w: d, h: d, fill: { color }, line: { color: 'FFFFFF', width: 1.5 } });
   s.addText(String(n), { x, y, w: d, h: d, fontSize: d >= 0.6 ? 18 : d > 0.4 ? 16 : 13, bold: true, color: 'FFFFFF', align: 'center', valign: 'middle', ...tb });
 }
-// 画面上の目印。番号の丸は枠の外（左、入らなければ右、どちらも入らなければ枠の内側の左上）に置き、画面の文字を隠さない。
-// img は画面の画像の範囲（addShot が返す box）
-function mark(s, r, n, img) {
-  const d = 0.28, gap = 0.05;
-  s.addShape(RADIUS > 0 ? pres.shapes.ROUNDED_RECTANGLE : pres.shapes.RECTANGLE, { ...r, ...(RADIUS > 0 ? { rectRadius: 0.04 } : {}), fill: { type: 'none' }, line: { color: HEX.mark, width: 1.75 } });
-  const by = r.y + (Math.min(r.h, 0.5) - d) / 2;
-  let bx = r.x - d - gap;
-  if (img && bx < img.x) bx = r.x + r.w + gap;
-  if (img && bx + d > img.x + img.w) { bx = r.x + 0.03; }
-  badge(s, bx, bx === r.x + 0.03 ? r.y + 0.03 : by, n, d, HEX.mark);
-  MARKS.push({ slide: CUR, n, x: r.x, y: r.y, w: r.w, h: r.h });
+// 画面上の目印（枠と番号）。1枚の画面の目印はまとめて drawMarks に渡す。
+// - 枠どうしが重なっていたら、重なりの真ん中で両方を縮めて離す（片方がもう片方を丸ごと含む場合はそのまま）
+// - 番号の丸は、ボタンや文字を隠さないよう枠の外に置く。小さい枠（ボタン・1行の欄）は上→下→右→左、
+//   大きい枠は左→上→右→下の順に、ほかの枠・番号に重ならない所を探す。画面の外の余白が空いていれば、そこを先に使う
+// - 決まらないときは deck.json の目印に "pos": "L" | "A" | "R" | "B"（左・上・右・下）を書くと、その位置を先に試す
+// list: [{ r: スライド上の枠, n: 番号, pos }]、img: 画面の画像の範囲（addShot が返す box）
+// opt.minY / opt.maxY：番号を置いてよい上端・下端（タイトルや下の手順に重ねないため）
+const hit = (a, b, m = 0.03) => a.x < b.x + b.w + m && b.x < a.x + a.w + m && a.y < b.y + b.h + m && b.y < a.y + a.h + m;
+function drawMarks(s, list, img, opt = {}) {
+  const d = 0.28, g = 0.05;
+  const top = opt.minY != null ? opt.minY : 1.08;
+  const lim = img
+    ? { x0: Math.max(0.05, img.x - d - g - 0.01), y0: Math.max(top, img.y - d - g - 0.01), x1: Math.min(13.28, img.x + img.w + d + g + 0.01), y1: Math.min(opt.maxY || 7.0, img.y + img.h + d + g + 0.01) }
+    : { x0: 0.05, y0: top, x1: 13.28, y1: opt.maxY || 7.0 };
+  const inside = (a, b) => a.x >= b.x - 0.01 && a.y >= b.y - 0.01 && a.x + a.w <= b.x + b.w + 0.01 && a.y + a.h <= b.y + b.h + 0.01;
+  for (let i = 0; i < list.length; i++) for (let j = i + 1; j < list.length; j++) {
+    const a = list[i].r, b = list[j].r;
+    if (!hit(a, b, 0) || inside(a, b) || inside(b, a)) continue;
+    const ox = Math.min(a.x + a.w, b.x + b.w) - Math.max(a.x, b.x), oy = Math.min(a.y + a.h, b.y + b.h) - Math.max(a.y, b.y);
+    const gap = 0.03;
+    if (oy <= ox) { const [t, u] = a.y < b.y ? [a, b] : [b, a]; const mid = (t.y + t.h + u.y) / 2; t.h = mid - gap - t.y; const e = u.y + u.h; u.y = mid + gap; u.h = e - u.y; }
+    else { const [l, q] = a.x < b.x ? [a, b] : [b, a]; const mid = (l.x + l.w + q.x) / 2; l.w = mid - gap - l.x; const e = q.x + q.w; q.x = mid + gap; q.w = e - q.x; }
+  }
+  for (const { r, n } of list) {
+    s.addShape(RADIUS > 0 ? pres.shapes.ROUNDED_RECTANGLE : pres.shapes.RECTANGLE, { ...r, ...(RADIUS > 0 ? { rectRadius: 0.04 } : {}), fill: { type: 'none' }, line: { color: HEX.mark, width: 1.75 } });
+    MARKS.push({ slide: CUR, n, x: r.x, y: r.y, w: r.w, h: r.h });
+  }
+  const placed = [];
+  for (const { r, n, pos } of list) {
+    // 左右に置くときは枠の上の方にそろえる（枠より上にははみ出さない）
+    const my = Math.max(r.y, r.y + Math.min(r.h / 2, 0.25) - d / 2);
+    const L = { x: r.x - d - g, y: my }, A = { x: r.x, y: r.y - d - g }, R = { x: r.x + r.w + g, y: my }, B = { x: r.x, y: r.y + r.h + g };
+    const small = r.h < 0.6 && r.w < 1.6;
+    let cands = [...(small ? [A, B, R, L] : [L, A, R, B]), { x: r.x - d - g, y: r.y - d - g }, { x: r.x + r.w + g, y: r.y - d - g }];
+    const want = pos && { L, A, R, B }[pos];
+    if (want) cands = [want, ...cands.filter(c => c !== want)];
+    else if (img) { const out = c => !hit({ x: c.x, y: c.y, w: d, h: d }, img, 0); cands = [...cands.filter(out), ...cands.filter(c => !out(c))]; }
+    // 番号の丸がこの枠を丸ごと含む大きな枠（画面全体の囲みなど）に乗るのはかまわない
+    const contains = o => o.x <= r.x + 0.01 && o.y <= r.y + 0.01 && o.x + o.w >= r.x + r.w - 0.01 && o.y + o.h >= r.y + r.h - 0.01;
+    let pick = null;
+    for (const c of cands) {
+      const b = { x: c.x, y: c.y, w: d, h: d };
+      if (b.x < lim.x0 || b.y < lim.y0 || b.x + d > lim.x1 || b.y + d > lim.y1) continue;
+      const m = c === want ? -0.02 : 0.03;
+      if (list.some(o => (o.r === r || !contains(o.r)) && hit(b, o.r, m)) || placed.some(o => hit(b, o, Math.max(m, 0)))) continue;
+      pick = b; break;
+    }
+    if (!pick) { pick = { x: r.x + 0.03, y: r.y + 0.03, w: d, h: d }; console.warn(`スライド${CUR}：番号${n}の置き場所が見つからず枠の内側に置きました。"pos" で位置を指定してください`); }
+    placed.push(pick);
+    badge(s, pick.x, pick.y, n, d, HEX.mark);
+  }
 }
+// marks の配列（null は番号だけ進めて枠を描かない）を drawMarks に渡す形にする
+const markList = (P, marks, start = 0) => (marks || []).map((m, i) => m ? { r: P.mark(m), n: start + i + 1, pos: typeof m === 'object' ? m.pos : undefined } : null).filter(Boolean);
 function note(s, n, x, y, w, h) {
   if (!n) return y;
   const warn = n.kind === 'warn';
@@ -217,7 +292,7 @@ async function addShot(s, spec, x, y, w, maxH) {
   const scale = meta.width / SRC_W;
   let [cx, cy, cw, ch] = spec.crop || [0, 0, SRC_W, Math.round(meta.height / scale)];
   if (spec.crop) {
-    const out = path.join(SHOTS, `_crop_${name}.png`);
+    const out = path.join(SHOTS, `_crop_${name}_${CUR}.png`);
     await sharp(file).extract({ left: Math.round(cx * scale), top: Math.round(cy * scale), width: Math.round(cw * scale), height: Math.round(ch * scale) }).toFile(out);
     file = out;
   }
@@ -248,6 +323,16 @@ async function addShot(s, spec, x, y, w, maxH) {
 // ---- スライド
 async function build() {
   await defineMasters();
+  // 目次（toc）の行。rows を書かなければ、章の扉（section）と "toc" を付けたスライドから作る。ページ番号はスライドの順番から自動で入れる
+  const page = i => i + 1;
+  const tocRows = () => {
+    const out = [];
+    deck.slides.forEach((x, i) => {
+      if (x.type === 'section') out.push([x.no, x.title, x.tocSub || x.sub || '', page(i)]);
+      else if (x.toc) out.push(['', typeof x.toc === 'string' ? x.toc : x.title, x.tocSub || '', page(i)]);
+    });
+    return out;
+  };
   let section = 'はじめに';
   pres.addSection({ title: section });
   for (const sl of deck.slides) {
@@ -255,6 +340,15 @@ async function build() {
     const master = sl.type === 'cover' ? 'TITLE' : sl.type === 'section' ? 'SECTION' : 'CONTENT';
     const s = pres.addSlide({ masterName: master, sectionTitle: section });
     CUR++;
+    // ロゴは全ページ右上。表紙と章の扉は濃い背景用、ほかは白い背景用
+    {
+      const dark = sl.type === 'cover' || sl.type === 'section';
+      const lg = dark ? LOGO.onDark : LOGO.onLight;
+      if (lg) {
+        const k = sl.type === 'section' ? 0.75 : 1;
+        s.addImage({ path: lg.path, x: LOGO_R - lg.w * k, y: dark ? 0.55 : 0.3, w: lg.w * k, h: lg.h * k, altText: 'logo' });
+      }
+    }
     if (sl.type === 'cover') {
       s.addText(fill(deck.title, 11.4, 40, true), { placeholder: 'title', ...LANG });
       s.addText(fill(deck.subtitle, 11.4, 18), { placeholder: 'body', ...LANG });
@@ -280,6 +374,42 @@ async function build() {
     } else if (sl.type === 'cards') {
       list(s, sl.cards, 1.45, sl.note ? 5.6 : 6.6);
       note(s, sl.note, 0.5, 5.85, 12.3);
+    } else if (sl.type === 'toc') {
+      // 目次：章（番号つき）と、その中の主な項目（字下げ）を並べ、右端にページ番号を置く
+      const rows = (sl.rows || tocRows()).map(([no, head, sub, pg]) => {
+        // ページ番号に文字を書いたら、その文字で始まるタイトルのスライドを探す
+        if (typeof pg === 'string' && !/^\d+$/.test(pg)) { const i = deck.slides.findIndex(x => (x.title || '').startsWith(pg)); if (i < 0) throw new Error(`目次の「${head}」：「${pg}」で始まるスライドがありません`); pg = page(i); }
+        return [no, head, sub, pg];
+      });
+      const bottom = sl.note ? 5.75 : 6.75, y0 = sl.where ? 1.6 : 1.5;
+      const hs = rows.map(([no]) => (no !== '' && no != null ? 0.64 : 0.46));
+      const k = Math.min(1, (bottom - y0) / hs.reduce((a, b) => a + b, 0));
+      s.addText('ページ', { x: 11.6, y: y0 - 0.32, w: 1.25, h: 0.28, fontSize: 10, color: HEX.gray, align: 'right', valign: 'bottom', ...tb });
+      let y = y0;
+      rows.forEach(([no, head, sub, pg], i) => {
+        const main = no !== '' && no != null, h = hs[i] * k;
+        if (main) s.addText(String(no).padStart(2, '0'), { x: 0.6, y, w: 0.8, h, fontSize: 20, bold: true, color: HEX.orange, valign: 'middle', ...tb });
+        s.addText(fill(head, main ? 4.6 : 4.15, main ? 17 : 13.5, main), { x: main ? 1.45 : 1.9, y, w: main ? 4.6 : 4.15, h, fontSize: main ? 17 : 13.5, bold: main, color: HEX.navy, valign: 'middle', ...tb });
+        if (sub) s.addText(fill(sub, 5.2, main ? 12.5 : 12), { x: 6.25, y, w: 5.2, h, fontSize: main ? 12.5 : 12, color: HEX.gray, valign: 'middle', ...tb });
+        s.addText(String(pg), { x: 11.6, y, w: 1.25, h, fontSize: main ? 17 : 13.5, bold: main, color: main ? HEX.navy : HEX.gray, align: 'right', valign: 'middle', ...tb });
+        s.addShape(pres.shapes.LINE, { x: 0.5, y: y + h, w: 12.35, h: 0, line: { color: main ? 'C3C9D3' : 'E4E7EC', width: 1 } });
+        y += h;
+      });
+      note(s, sl.note, 0.5, Math.max(y + 0.3, 5.85), 12.3);
+    } else if (sl.type === 'compare') {
+      // 左に管理画面、右にサイトでの表示を並べる。同じ番号どうしが対応する（サイトに出ない項目は右の marks を null に）
+      const labels = sl.labels || ['管理画面', 'サイトでの表示'];
+      const y0 = sl.where ? 1.38 : 1.2, top = y0 + 0.46, maxH = 5.2 - top, colW = 5.95;
+      for (const [i, sp] of sl.shots.entries()) {
+        const cx = 0.5 + i * 6.35, lw = 0.4 + labels[i].length * 0.17;
+        s.addShape(boxShape(), { x: cx, y: y0, w: lw, h: 0.32, ...round(0.8), fill: { color: i ? HEX.orange : HEX.navy }, line: { color: i ? HEX.orange : HEX.navy } });
+        s.addText(labels[i], { x: cx, y: y0, w: lw, h: 0.32, fontSize: 11.5, bold: true, color: 'FFFFFF', align: 'center', valign: 'middle', ...tb });
+        const sz = await shotSize(sp, colW, maxH);
+        const P = await addShot(s, sp, cx + (colW - sz.w) / 2, top, colW, maxH);
+        drawMarks(s, markList(P, sp.marks), P.box, { minY: top, maxY: 5.3 });
+      }
+      hsteps(s, sl.steps, 5.45);
+      note(s, sl.note, 0.5, 6.5, 12.3, 0.45);
     } else if (sl.type === 'table') {
       const hdr = t => ({ text: t, options: { bold: true, color: 'FFFFFF', fill: { color: HEX.navy }, ...LANG } });
       const cols = sl.header.length;
@@ -296,7 +426,8 @@ async function build() {
       let n = 0;
       for (const [i, sp] of sl.shots.entries()) {
         const P = await addShot(s, sp, 0.5 + i * 6.3, 1.3, 6.0);
-        for (const m of sp.marks || []) mark(s, P.mark(m), ++n, P.box);
+        drawMarks(s, markList(P, sp.marks, n), P.box, { maxY: 5.22 });
+        n += (sp.marks || []).length;
       }
       hsteps(s, sl.steps, 5.28);
       note(s, sl.note, 0.5, 6.35, 12.3, 0.5);
@@ -309,25 +440,27 @@ async function build() {
       const rightH = stepsHeight(sl.steps || [], 12.85 - sx0) + (sl.note ? 0.1 + noteHeight(sl.note, 12.85 - sx0) : 0);
       const y0 = sl.extra ? 1.3 : 1.3 + Math.max(0, (6.85 - 1.3 - Math.max(sz.h, rightH)) / 2);
       const P = tall ? await addShot(s, sl, 0.9, y0, 10, 5.4) : await addShot(s, sl, 0.5, y0, 8.4, 5.55);
-      (sl.marks || []).forEach((m, i) => mark(s, P.mark(m), i + 1, P.box));
+      drawMarks(s, markList(P, sl.marks), P.box, { minY: sl.where ? 1.3 : 1.08 });
       const sx = tall ? P.box.x + P.box.w + 0.7 : 9.25;
       const sw = 12.85 - sx;
       const end = steps(s, sl.steps || [], sx, y0 + 0.05, sw);
       if (end > 7.0) console.warn(`スライド${CUR}「${sl.title}」：手順が下にはみ出しそうです。説明を削るか、手順を分けてください`);
       if (sl.extra) {
-        const y = Math.max(end, 5.4);
-        s.addShape(boxShape(), { x: sx, y, w: sw, h: 1.3, ...round(1), fill: { color: HEX.light }, line: { color: HEX.light } });
         const ex = W.wrapRuns([
           { text: sl.extra.head, options: { bold: true, color: HEX.navy, breakLine: true } },
           ...sl.extra.lines.map((l, i) => ({ text: l, options: { color: i === sl.extra.lines.length - 1 && sl.extra.accentLast ? HEX.orange : HEX.gray, bold: i === sl.extra.lines.length - 1 && sl.extra.accentLast, breakLine: i < sl.extra.lines.length - 1 } })),
         ], sw - 0.4, 14);
-        s.addText(ex.runs, { x: sx + 0.25, y, w: sw - 0.4, h: 1.3, fontSize: 14, valign: 'middle', lineSpacingMultiple: 1.25, ...tb });
+        // 行数に合わせて高さを決める（ログイン情報のように行が多いときもはみ出さない）
+        const eh = Math.max(1.3, 0.35 + 0.29 * ex.lines);
+        const y = Math.min(Math.max(end, 5.4), 6.95 - eh);
+        s.addShape(boxShape(), { x: sx, y, w: sw, h: eh, ...round(1), fill: { color: HEX.light }, line: { color: HEX.light } });
+        s.addText(ex.runs, { x: sx + 0.25, y, w: sw - 0.4, h: eh, fontSize: 14, valign: 'middle', lineSpacingMultiple: 1.25, ...tb });
       }
       note(s, sl.note, sx, Math.min(end + 0.1, 6.0), sw);
     } else if (sl.type === 'place') {
       // サイトでの表示場所：公開側の画面を左に、表示されるページ・位置・URL を右に並べる
       const P = await addShot(s, sl, 0.5, 1.3, 8.4, 5.6);
-      (sl.marks || []).forEach((m, i) => mark(s, P.mark(m), i + 1, P.box));
+      drawMarks(s, markList(P, sl.marks), P.box, { minY: sl.where ? 1.3 : 1.08 });
       const items =[['表示されるページ', sl.pages], ['表示される位置', sl.position], [sl.urlLabel || 'URL', sl.urls]];
       let cy = 1.35;
       for (const [head, val] of items) {

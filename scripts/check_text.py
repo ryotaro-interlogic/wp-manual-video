@@ -164,6 +164,26 @@ def check(deck):
         if run == 3:
             out.append((where, f'{form}のタイトルが3枚続いている。やることから始める形に変える', title))
 
+    # クライアントの指摘で決まったこと（SKILL.md「必ず入れるもの」）
+    types = [sl.get('type') for sl in slides]
+    if 'toc' not in types:
+        out.append(('全体', '目次（toc）が無い。表紙の次に置く', ''))
+    for i, sl in enumerate(slides, 1):
+        if re.search(r'このマニュアルで(説明|扱う)', sl.get('title', '')):
+            out.append((f'スライド{i}', '「このマニュアルで説明すること」ではなく目次（toc）にする', sl['title']))
+    login = [sl for sl in slides if sl.get('type') == 'shot' and 'login' in str(sl.get('shot', '')).lower()]
+    for sl in login:
+        lines = ' '.join((sl.get('extra') or {}).get('lines', []))
+        if not ('ユーザー名' in lines and 'パスワード' in lines):
+            out.append(('ログインのスライド', 'extra に「ログイン情報」（URL・ユーザー名・パスワード）が無い。{{editor.user}} {{editor.pass}} で差し込む', sl.get('title', '')))
+    if 'compare' not in types:
+        out.append(('全体', 'compare（管理画面とサイトの対応）が無い。入力した内容がサイトのどこに出るかをサイトのスクリーンショットと並べて見せる', ''))
+    for i, sl in enumerate(slides, 1):
+        if sl.get('type') == 'compare':
+            a, b = [len(x.get('marks') or []) for x in sl.get('shots', [{}, {}])[:2]]
+            if not (a == b == len(sl.get('steps') or [])):
+                out.append((f'スライド{i}（compare）', f'左の marks {a}個・右の marks {b}個・steps {len(sl.get("steps") or [])}個がそろっていない（サイトに出ない欄は右を null に）', sl.get('title', '')))
+
     # note の数（全体の3分の1が目安）
     with_note = [sl for sl in content if sl.get('note')]
     if content and len(with_note) > len(content) / 3 + 1:
